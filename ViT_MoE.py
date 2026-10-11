@@ -37,7 +37,6 @@ from timm.models.helpers import build_model_with_cfg, named_apply, adapt_input_c
 from timm.models.layers import PatchEmbed, Mlp, DropPath, trunc_normal_, lecun_normal_
 from timm.models.registry import register_model
 from torch.distributions.normal import Normal
-from torch.utils.checkpoint import checkpoint
 
 
 _logger = logging.getLogger(__name__)
@@ -882,7 +881,6 @@ class VisionTransformer(nn.Module):
     Includes distillation token & head support for `DeiT: Data-efficient Image Transformers`
         - https://arxiv.org/abs/2012.12877
     """
-    grad_checkpointing = False
 
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=2, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, representation_size=None, distilled=False,
@@ -1011,6 +1009,7 @@ class VisionTransformer(nn.Module):
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
         if self.num_tokens == 2:
             self.head_dist = nn.Linear(self.embed_dim, self.num_classes) if num_classes > 0 else nn.Identity()
+
     def forward_features(self, x):
         x = self.patch_embed(x)
         cls_token = self.cls_token.expand(x.shape[0], -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
@@ -1019,17 +1018,16 @@ class VisionTransformer(nn.Module):
         lora_loss_list = []
         adapter_loss_list = []
         for block in self.blocks:
-            if self.grad_checkpointing and torch.is_grad_enabled():
-                x,cur_lora_loss,cur_adapter_loss = checkpoint(block, x, use_reentrant=False)
-            else:
-                x,cur_lora_loss,cur_adapter_loss = block(x)
+            x,cur_lora_loss,cur_adapter_loss = block(x)
             lora_loss_list.append(cur_lora_loss)
             adapter_loss_list.append(cur_adapter_loss)
+        # lora_loss = lora_loss_list
         lora_loss = torch.mean(torch.stack(lora_loss_list))
         adapter_loss = torch.mean(torch.stack(adapter_loss_list))
         moe_loss = lora_loss*200+adapter_loss*1
         x = self.norm(x)
         return self.pre_logits(x[:, 0]),moe_loss
+
 
     def forward(self, x):
         x,moe_loss = self.forward_features(x) # 0th branch for classifier
