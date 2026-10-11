@@ -34,7 +34,8 @@ def setup_seed(seed):
 def test(args, model,test_loader,model_path):
 
     checkpoint = torch.load(model_path, map_location='cuda:{}'.format(torch.cuda.current_device()))
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # epoch checkpoints (.tar) wrap the weights; best-model files (.pkl) are a bare state_dict
+    model.load_state_dict(checkpoint.get('model_state_dict', checkpoint))
 
     print('start test mode...')
     model.eval()
@@ -66,6 +67,7 @@ def test(args, model,test_loader,model_path):
     video_results = cal_metrics(video_labels, video_predictions, threshold=0.5)  # 'best' 'auto' or float
     print('Test result: V_Acc: {:.2%}, V_Auc: {:.4} V_EER:{:.2%} F_Acc: {:.2%}, F_Auc: {:.4} F_EER:{:.2%}'
              .format(video_results.ACC, video_results.AUC, video_results.EER,frame_results.ACC, frame_results.AUC, frame_results.EER))
+    return video_results.AUC
 
 
 if __name__ == '__main__':
@@ -90,7 +92,7 @@ if __name__ == '__main__':
     os.environ['CUDA_VISIBLE_DEVICES'] = '{}'.format(args.device)
     device = torch.device("cuda:{}".format(args.device) if torch.cuda.is_available() else "cpu")
 
-    test_path = '/data3/law/data/Celeb_DF/test'
+    test_path = '/data/test_datasets/CDF'
     test_dataset =TestDataset(test_path,dataset='CDF',frame=100)
 
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=args.num_workers)
@@ -102,7 +104,7 @@ if __name__ == '__main__':
 
 
     print('Start eval process...')
-    test(args, model,test_loader,args.model_path)
+    auc = test(args, model,test_loader,args.model_path)
     duration = time.time()-start_time
-    print('The best AUC is {:.2%}'.format(auc))
+    print('The video AUC is {:.2%}'.format(auc))
     print('The run time is {}h {}m'.format(int(duration//3600),int(duration%3600//60)))

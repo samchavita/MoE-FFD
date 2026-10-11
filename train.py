@@ -35,7 +35,6 @@ def train(args, model, optimizer,train_loader,valid_loader,scheduler,save_dir):
     max_accuracy = 0
     global_step = 0
     criterion = nn.CrossEntropyLoss()
-    scaler = torch.cuda.amp.GradScaler()
 
     if not os.path.exists(save_dir):
         os.mkdir(save_dir)
@@ -58,15 +57,18 @@ def train(args, model, optimizer,train_loader,valid_loader,scheduler,save_dir):
 
         with torch.enable_grad():
             st_time = time.time()
+            optimizer.zero_grad()
             for i, (inputs, labels) in enumerate(train_loader):
-                optimizer.zero_grad()
                 inputs = inputs.cuda()
                 labels = labels.cuda()
                 outputs,moe_loss= model(inputs)
                 ce_loss = criterion(outputs, labels)
                 loss = ce_loss + 1*moe_loss
-                loss.backward()
-                optimizer.step()
+                # gradient accumulation: effective batch size = batch_size * accum_steps
+                (loss / args.accum_steps).backward()
+                if (i+1) % args.accum_steps == 0 or (i+1) == len(train_loader):
+                    optimizer.step()
+                    optimizer.zero_grad()
 
                 epoch_loss += loss.item()
                 total_num += inputs.size(0)
@@ -127,9 +129,11 @@ def train(args, model, optimizer,train_loader,valid_loader,scheduler,save_dir):
                     curent_models = m
                     os.remove(os.path.join(save_dir, curent_models))
             max_accuracy = video_results.AUC
-            torch.save(model.state_dict(), '{}model_params_best_{:.4f}auc{:.4f}epoch{:0>3}.pkl'.format(args.model_dir, video_results.ACC,video_results.AUC,epoch+1))
+            torch.save(model.state_dict(), os.path.join(save_dir, 'model_params_best_{:.4f}auc{:.4f}epoch{:0>3}.pkl'.format(video_results.ACC,video_results.AUC,epoch+1)))
 
         scheduler.step()
+
+    return max_accuracy
 
 
 if __name__ == '__main__':
@@ -142,10 +146,12 @@ if __name__ == '__main__':
     parser.add_argument('--record_step', type=int, default=100, help="the iteration number to record train state")
 
     parser.add_argument('--batch_size','-bs', type=int, default=32)
+    parser.add_argument('--accum_steps','-as', type=int, default=1, help="batches to accumulate per optimizer step (effective batch = batch_size * accum_steps)")
     parser.add_argument('--learning_rate','-lr', type=float, default=3e-5)
     parser.add_argument('--num_classes', type=int, default=2)
     parser.add_argument('--num_frames', type=int, default=1)
     parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--grad_ckpt', action='store_true')
     args = parser.parse_args()
 
 
@@ -174,8 +180,8 @@ if __name__ == '__main__':
     logging.info(args.model_dir)
     log.info('model dir:' + args.model_dir)
 
-    train_path = '/data3/law/data/FF++/c23/train'
-    valid_path = '/data3/law/data/FF++/c23/valid'
+    train_path = '/data/FaceForensics++/c23/train'
+    valid_path = '/data/FaceForensics++/c23/valid'
 
 
     train_dataset = FFPP_Dataset(train_path,frame=20,phase='train')
@@ -186,6 +192,7 @@ if __name__ == '__main__':
 
     model = vit_base_patch16_224_in21k(pretrained=True,num_classes=2)
     model = model.cuda()
+    model.grad_checkpointing = args.grad_ckpt
     print('Number of model parameters: {}'.format(sum([p.data.nelement() for p in model.parameters()])))
 
     # loss function and optimizer
@@ -200,14 +207,20 @@ if __name__ == '__main__':
         else:
             other_param.append(param)
 
-    optimizer = optim.Adam([{'params': special_param, 'initial_lr':1e-4}, {'params': other_param, 'initial_lr': args.learning_rate}],
+    optimizer = optim.Adam([{'params': special_param, 'lr': 1e-4, 'initial_lr': 1e-4},
+         {'params': other_param, 'lr': args.learning_rate, 'initial_lr': args.learning_rate}],
                            lr=args.learning_rate, betas=(0.9, 0.999), weight_decay=1e-5)
+    
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5, last_epoch=args.resume)
+
+    # print( [g['lr'] for g in optimizer.param_groups] )
+    # import sys
+    # sys.exit(0)  # Successful termination   
 
 
     print('Start train process...')
-    train(args, model,optimizer,train_loader,valid_loader,scheduler,save_dir)
+    auc = train(args, model,optimizer,train_loader,valid_loader,scheduler,save_dir)
     duration = time.time()-start_time
-    print('The task of {} is completed'.format(args.description))
+    print('The task of {} is completed'.format(args.model_dir))
     print('The best AUC is {:.2%}'.format(auc))
     print('The run time is {}h {}m'.format(int(duration//3600),int(duration%3600//60)))
